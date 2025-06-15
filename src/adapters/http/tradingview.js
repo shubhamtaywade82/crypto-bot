@@ -18,17 +18,17 @@ const validate = ajv.compile(schema);
 module.exports =
   ({ openCmd, closeCmd }) =>
   async (req, res, next) => {
-    const alert = req.body;
-    if (!validate(alert)) {
+    if (!validate(req.body))
       return res
         .status(400)
         .json({ error: "invalid payload", details: validate.errors });
-    }
 
     try {
-      alert.action === "OPEN" ? await openCmd(alert) : await closeCmd(alert);
+      const a = req.body;
+      if (a.action === "OPEN") await openCmd(a);
+      else await closeCmd(a);
       res.json({ success: true });
-    } catch (err) {
-      next(err); // central error handler logs + 500
-    }
+    } catch (e) {
+      next(e);
+    } // let central handler + winston deal with it
   };

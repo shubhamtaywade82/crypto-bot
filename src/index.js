@@ -1,16 +1,16 @@
 const express = require("express");
-const body = require("body-parser");
-const env = require("./config/env");
-const logger = require("./config/logger");
-
-const expressWinston = require("express-winston");
-
+const bodyParser = require("body-parser");
 const morgan = require("morgan");
+const expressWinston = require("express-winston");
+const logger = require("./config/logger");
+const env = require("./config/env");
 
+/* domain … ----------------------------------------------------------------- */
 const exchange = require("./adapters/exchange/delta");
 const products = require("./adapters/exchange/products");
 const store = require("./adapters/persistence/memoryPositions");
 const risk = require("./domain/services/RiskService");
+
 const openCmd = require("./application/commands/openPosition")({
   exchange,
   products,
@@ -22,46 +22,51 @@ const closeCmd = require("./application/commands/closePosition")({
   store,
 });
 
-async function main() {
-  await products.ready(); // ← wait here
-  logger.info(`Loaded ${products.all?.().length || "all"} products`);
+(async () => {
+  /* preload product cache */
+  const list = await products.ready();
+  logger.info(`Loaded ${list.length} products`);
 
   const deps = { exchange, products, store, risk, openCmd, closeCmd };
 
-  /* ─── HTTP layer ──────────────────────────────────────────────────── */
+  /* ─── HTTP layer ────────────────────────────────────────────────────── */
   const app = express();
+  app.use(bodyParser.json());
 
-  // 1️⃣  Body-parser first so later middleware can see req.body
-  app.use(body.json());
-
-  // 2️⃣  REQUEST/RESPONSE logger (one line per call)
+  /* 1️⃣ very slim access log ------------------------------------------- */
+  morgan.token("body", (req) =>
+    req.method === "POST"
+      ? JSON.stringify(req.body).slice(0, 200) // truncate long alerts
+      : ""
+  );
   app.use(
-    expressWinston.logger({
-      winstonInstance: logger,
-      level: "http", // one Winston level
-      meta: true,
-      msg: "HTTP {{req.method}} {{req.url}} {{res.statusCode}} {{res.responseTime}}ms",
-      requestWhitelist: ["body", "query", "params", "headers"],
-      responseWhitelist: ["body"],
+    morgan(":method :url :status :response-time ms :body", {
+      immediate: true,
+      stream: { write: (msg) => logger.http(msg.trim()) },
     })
   );
 
-  // 3️⃣  Routes
+  /* 2️⃣ routes ---------------------------------------------------------- */
   app.use("/webhooks", require("./adapters/http/tradingview")(deps));
   app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
-  // 4️⃣  ERROR logger (must come *after* routes)
-  app.use(
-    expressWinston.errorLogger({
-      winstonInstance: logger,
-    })
-  );
+  /* 3️⃣ domain → http error mapper ------------------------------------- */
+  app.use((err, _req, res, next) => {
+    /* Swagger errors have err.response; plain throw() have only message */
+    const code = err.response?.body?.error?.code || "internal_error";
+    const ctx = err.response?.body?.error?.context || null;
+    const status = err.response?.statusCode === 400 ? 400 : 500;
 
-  /* start server ------------------------------------------------------ */
+    res.status(status).json({ code, msg: err.message, ctx, status });
+    next(Object.assign(new Error(code), { ctx, status })); // → winston
+  });
+
+  app.use((err, _req, _res, _next) => {
+    logger.error(err.message, { status: err.status, ctx: err.ctx });
+  });
+
   app.listen(env.port, () => logger.info(`API on :${env.port}`));
-}
-
-main().catch((err) => {
-  logger.error("fatal boot error", err);
+})().catch((e) => {
+  logger.error("fatal boot error", e);
   process.exit(1);
 });
