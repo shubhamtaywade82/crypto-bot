@@ -19,6 +19,6 @@ format.printf(({ timestamp, level, message, ...meta }) => {
   }
   return `${timestamp} ${level}: ${message}${metaStr}`;
 })
- // ),
+  ),
   transports: [new transports.Console()],
 });
