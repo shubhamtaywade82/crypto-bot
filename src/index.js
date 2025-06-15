@@ -1,9 +1,11 @@
 const express = require("express");
 const body = require("body-parser");
 const env = require("./config/env");
-const morgan = require("morgan");
 const logger = require("./config/logger");
+
 const expressWinston = require("express-winston");
+
+const morgan = require("morgan");
 
 const exchange = require("./adapters/exchange/delta");
 const products = require("./adapters/exchange/products");
@@ -26,34 +28,37 @@ async function main() {
 
   const deps = { exchange, products, store, risk, openCmd, closeCmd };
 
-  /* HTTP layer ---------------------------------------------------------- */
+  /* ─── HTTP layer ──────────────────────────────────────────────────── */
   const app = express();
+
+  // 1️⃣  Body-parser first so later middleware can see req.body
+  app.use(body.json());
+
+  // 2️⃣  REQUEST/RESPONSE logger (one line per call)
   app.use(
     expressWinston.logger({
-      winstonInstance: logger, // reuse your singleton
-      meta: true, // log body, query, etc.
+      winstonInstance: logger,
+      level: "http", // one Winston level
+      meta: true,
       msg: "HTTP {{req.method}} {{req.url}} {{res.statusCode}} {{res.responseTime}}ms",
-      colorize: false,
-      requestWhitelist: ["body", "headers"], // keep these fields
+      requestWhitelist: ["body", "query", "params", "headers"],
       responseWhitelist: ["body"],
     })
   );
-  app.use(body.json());
-  app.use(
-    morgan(":method :url :status :response-time ms - :res[content-length]", {
-      stream: { write: (msg) => logger.http(msg.trim()) },
-    })
-  );
 
+  // 3️⃣  Routes
   app.use("/webhooks", require("./adapters/http/tradingview")(deps));
   app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
-  app.listen(env.port, () => logger.info(`API on :${env.port}`));
+  // 4️⃣  ERROR logger (must come *after* routes)
+  app.use(
+    expressWinston.errorLogger({
+      winstonInstance: logger,
+    })
+  );
 
-  app.use((err, _req, res, _next) => {
-    logger.error(err);
-    res.status(500).json({ error: err.message });
-  });
+  /* start server ------------------------------------------------------ */
+  app.listen(env.port, () => logger.info(`API on :${env.port}`));
 }
 
 main().catch((err) => {
