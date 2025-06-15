@@ -1,23 +1,34 @@
-/**
- * expected payload (TradingView → Alert → Webhook):
- * {
- *   "action": "OPEN" | "CLOSE",
- *   "product": "BTCUSD",
- *   "side": "buy" | "sell",
- *   "qty": 50,
- *   "client_order_id": "{{order.id}}"
- * }
- */
+const Ajv = require("ajv"); // npm i ajv
+const ajv = new Ajv();
+
+const schema = {
+  type: "object",
+  required: ["action", "product", "side", "qty"],
+  properties: {
+    action: { enum: ["OPEN", "CLOSE"] },
+    product: { type: "string" },
+    side: { enum: ["buy", "sell"] },
+    qty: { type: "number", minimum: 1 },
+    client_order_id: { type: "string", nullable: true },
+  },
+  additionalProperties: false,
+};
+const validate = ajv.compile(schema);
+
 module.exports =
   ({ openCmd, closeCmd }) =>
-  (req, res) => {
+  async (req, res, next) => {
     const alert = req.body;
-    if (!alert || !alert.action) return res.status(400).end();
+    if (!validate(alert)) {
+      return res
+        .status(400)
+        .json({ error: "invalid payload", details: validate.errors });
+    }
 
-    (alert.action === "OPEN" ? openCmd(alert) : closeCmd(alert))
-      .then(() => res.json({ success: true }))
-      .catch((err) => {
-        req.app.logger?.error(err);
-        res.status(500).json({ error: err.message });
-      });
+    try {
+      alert.action === "OPEN" ? await openCmd(alert) : await closeCmd(alert);
+      res.json({ success: true });
+    } catch (err) {
+      next(err); // central error handler logs + 500
+    }
   };

@@ -1,13 +1,15 @@
 const { createLogger, format, transports } = require("winston");
 
-// simple console logger -- extend later with files, slack, etc.
 const logger = createLogger({
-  level: process.env.LOG_LEVEL || "debug",
+  level: process.env.LOG_LEVEL || "info",
   format: format.combine(
+    format.timestamp({ format: "YYYY-MM-DD HH:mm:ss.SSS" }),
+    format.errors({ stack: true }), // print stack on error
     format.colorize(),
-    format.timestamp({ format: "HH:mm:ss" }),
     format.printf(
-      ({ level, message, timestamp }) => `[${timestamp}] ${level}: ${message}`
+      ({ timestamp, level, message, ...meta }) =>
+        `${timestamp} ${level}: ${message} ` +
+        (Object.keys(meta).length ? JSON.stringify(meta) : "")
     )
   ),
   transports: [new transports.Console()],
