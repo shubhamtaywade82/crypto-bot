@@ -1,18 +1,30 @@
 const DeltaRestClient = require("delta-rest-client");
 const { delta } = require("../../config/env");
 
-// ❶ create a single promise that resolves to the real SDK instance
-const clientP = new DeltaRestClient(delta.key, delta.sec, delta.url);
+// one global, promise-based client
+const clientP = new DeltaRestClient(delta.key, delta.secret, delta.rest);
 
-// ❷ tiny helper so every call gets a ready client
-const withClient = async (fn) => fn(await clientP);
+const withClient = (fn) => clientP.then(fn); // tiny helper
 
 module.exports = {
   listProducts: () => withClient((c) => c.apis.Products.getProducts()),
+
   marketOrder: (p) =>
     withClient((c) =>
-      c.apis.Orders.placeOrder({ ...p, order_type: "market_order" })
+      c.apis.Orders.placeOrder({
+        order_type: "market_order",
+        ...p,
+      })
     ),
+
   reduceOnly: (p) =>
-    withClient((c) => c.apis.Orders.placeOrder({ ...p, reduce_only: true })),
+    withClient((c) =>
+      c.apis.Orders.placeOrder({
+        reduce_only: true,
+        ...p,
+      })
+    ),
+
+  cancelAll: (product_id) =>
+    withClient((c) => c.apis.Orders.cancelOrders({ product_id })),
 };

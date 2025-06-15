@@ -1,12 +1,15 @@
 module.exports =
-  (deps) =>
-  async ({ productId }) => {
-    const pos = deps.store.get(productId);
-    if (!pos) return;
-    await deps.exchange.reduceOnly({
-      productId,
-      side: pos.side === "BUY" ? "SELL" : "BUY",
-      size: pos.qty,
+  ({ exchange, store }) =>
+  async (alert) => {
+    const pos = store.get(alert.product);
+    if (!pos) throw new Error("no open pos");
+
+    await exchange.reduceOnly({
+      product_id: pos.product_id,
+      side: pos.side === "buy" ? "sell" : "buy",
+      size: pos.size,
+      client_order_id: alert.client_order_id,
     });
-    deps.store.del(productId);
+
+    store.remove(alert.product);
   };

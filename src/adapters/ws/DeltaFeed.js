@@ -10,10 +10,11 @@ const WS_URL = delta.socket || "wss://socket.india.delta.exchange"; // put test-
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-const sign = (
-  ts // HMAC_SHA256(secret, `GET${ts}/live`)
-) =>
-  crypto.createHmac("sha256", delta.sec).update(`GET${ts}/live`).digest("hex");
+const sign = (ts) =>
+  crypto
+    .createHmac("sha256", delta.secret)
+    .update(`GET${ts}/live`)
+    .digest("hex");
 
 let ws = null; // singleton instance
 let hbTimer = null; // server heartbeat watchdog
@@ -34,7 +35,7 @@ function start(deps) {
   ws.on("open", () => {
     logger.info("[WS] socket opened");
     const ts = (Date.now() * 1_000).toString(); // μ-seconds
-    logger.debug(`[WS] sig ${sign(ts)}`); 
+    logger.debug(`[WS] sig ${sign(ts)}`);
     ws.send(
       JSON.stringify({
         type: "auth",

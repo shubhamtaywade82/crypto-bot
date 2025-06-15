@@ -1,14 +1,16 @@
 module.exports =
-  (deps) =>
-  async ({ symbol, side, qty }) => {
-    const { exchange, products, store, risk } = deps;
-    const product = products.bySymbol(symbol);
-    const mkt = await exchange.marketOrder({
-      productId: product.id,
+  ({ exchange, store, products, risk }) =>
+  async (alert) => {
+    const { product, side, qty, client_order_id } = alert;
+    const prod = await products.getBySymbol(product);
+    risk.checkOpen(prod.id, qty); // throws if over-risk
+
+    await exchange.marketOrder({
+      product_id: prod.id,
       side,
       size: qty,
+      client_order_id,
     });
-    const price = Number(mkt.body.price);
-    const { sl, tp } = risk.calcTargets(price, side);
-    store.upsert(product.id, { side, qty, sl, tp });
+
+    store.addPosition(prod.id, side, qty); // local cache
   };
