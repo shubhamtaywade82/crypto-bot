@@ -1,4 +1,4 @@
-require("dotenv").config(); // load .env at boot
+require("dotenv").config();
 
 function must(name) {
   const v = process.env[name];
@@ -7,9 +7,10 @@ function must(name) {
 }
 
 module.exports = {
+  port: process.env.PORT || 3000,
   delta: {
-    key: process.env.DELTA_API_KEY,
-    secret: process.env.DELTA_API_SECRET,
-    restUrl: process.env.DELTA_BASE_URL || 'https://api.india.delta.exchange'
-  }
+    key: must('DELTA_API_KEY'),
+    secret: must('DELTA_API_SECRET'),
+    restUrl: process.env.DELTA_BASE_URL || "https://api.india.delta.exchange",
+  },
 };

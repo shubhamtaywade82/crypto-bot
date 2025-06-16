@@ -1,12 +1,11 @@
-// src/adapters/exchange/marketData.js
-const { request } = require('./deltaRest');
+const { publicRequest } = require("./publicRest");
 
 async function listProducts() {
-  return request('GET', '/products');
+  return publicRequest("GET", "/v2/products");
 }
 
 async function getTicker(symbol) {
-  return request('GET', `/tickers/${symbol}`);
+  return publicRequest("GET", `/v2/tickers/${symbol}`);
 }
 
 module.exports = { listProducts, getTicker };
