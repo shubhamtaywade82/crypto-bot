@@ -1,0 +1,480 @@
+# File: src/adapters/exchange/delta.js
+// src/adapters/exchange/delta.js
+const market = require('./marketData');
+const trade = require('./trading');
+
+module.exports = {
+  ...market,
+  ...trade
+};
+
+# File: src/adapters/exchange/deltaRest.js
+// src/adapters/exchange/deltaRest.js
+const axios = require('axios');
+const { delta } = require('../../config/env');
+const { generateSignature, serializeQuery } = require('./utils');
+
+const instance = axios.create({
+  baseURL: delta.restUrl,
+  timeout: 5000,
+  headers: { 'Content-Type': 'application/json' }
+});
+
+async function request(method, path, params = {}, body = {}) {
+  const timestamp = Date.now().toString();
+  const queryStr = serializeQuery(params);
+  const bodyStr = (method === 'GET' || !body) ? '' : JSON.stringify(body);
+  const fullPath = path + (queryStr ? `?${queryStr}` : '');
+
+  const signature = generateSignature(delta.secret, timestamp, method, path, queryStr, bodyStr);
+
+  const headers = {
+    'api-key': delta.key,
+    'timestamp': timestamp,
+    'signature': signature
+  };
+
+  return instance.request({
+    method,
+    url: fullPath,
+    params,
+    data: body,
+    headers
+  }).then(res => res.data);
+}
+
+module.exports = { request };
+
+# File: src/adapters/exchange/marketData.js
+const { publicRequest } = require('./publicRest');
+
+async function listProducts() {
+  return publicRequest('GET', '/v2/products');
+}
+
+async function getTicker(symbol) {
+  return publicRequest('GET', `/v2/tickers/${symbol}`);
+}
+
+module.exports = { listProducts, getTicker };
+
+# File: src/adapters/exchange/products.js
+const { listProducts } = require("./delta"); // helper exists again
+let cache = [];
+
+let readyP = refresh();
+
+async function refresh() {
+  const body = await listProducts();
+  cache = Array.isArray(body.result) ? body.result : body;
+  setTimeout(refresh, 60 * 60 * 1000);
+  return cache;
+}
+
+module.exports = {
+  bySymbol: (s) => cache.find((p) => p.symbol === s),
+  getBySymbol: (s) => cache.find((p) => p.symbol === s), // ← alias for legacy code
+  ready: () => readyP,
+};
+
+
+# File: src/adapters/exchange/publicRest.js
+const axios = require('axios');
+const { delta } = require('../../config/env');
+
+const instance = axios.create({
+  baseURL: delta.restUrl,
+  timeout: 5000,
+  headers: { 'Content-Type': 'application/json' }
+});
+
+async function publicRequest(method, path, params = {}) {
+  return instance.request({
+    method,
+    url: path,
+    params
+  }).then(res => res.data);
+}
+
+module.exports = { publicRequest };
+
+# File: src/adapters/exchange/trading.js
+// src/adapters/exchange/trading.js
+const { request } = require('./deltaRest');
+
+async function placeOrder(order) {
+  return request('POST', '/orders', {}, order);
+}
+
+async function cancelOrder(order_id) {
+  return request('DELETE', `/orders/${order_id}`);
+}
+
+async function changeLeverage(payload) {
+  return request('POST', '/positions/change_leverage', {}, payload);
+}
+
+async function getBalances() {
+  return request('GET', '/wallet/balances');
+}
+
+module.exports = { placeOrder, cancelOrder, changeLeverage, getBalances };
+
+# File: src/adapters/exchange/utils.js
+// src/adapters/exchange/utils.js
+const crypto = require('crypto');
+
+function generateSignature(secret, timestamp, method, path, query, body) {
+  const payload = `${timestamp}${method}${path}${query}${body}`;
+  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
+}
+
+function serializeQuery(params = {}) {
+  const keys = Object.keys(params).sort();
+  return keys.map(k => `${k}=${encodeURIComponent(params[k])}`).join('&');
+}
+
+module.exports = { generateSignature, serializeQuery };
+
+# File: src/adapters/http/health.js
+module.exports = (feed) => (_, res) => res.json({ wsUp: feed.isConnected() });
+
+
+# File: src/adapters/http/tradingview.js
+const Ajv = require("ajv"); // npm i ajv
+const ajv = new Ajv();
+
+const schema = {
+  type: "object",
+  required: ["action", "product", "side", "qty"],
+  properties: {
+    action: { enum: ["OPEN", "CLOSE"] },
+    product: { type: "string" },
+    side: { enum: ["buy", "sell"] },
+    qty: { type: "number", minimum: 1 },
+    client_order_id: { type: "string", nullable: true },
+  },
+  additionalProperties: false,
+};
+const validate = ajv.compile(schema);
+
+module.exports =
+  ({ openCmd, closeCmd }) =>
+  async (req, res, next) => {
+    if (!validate(req.body))
+      return res
+        .status(400)
+        .json({ error: "invalid payload", details: validate.errors });
+
+    try {
+      const a = req.body;
+      if (a.action === "OPEN") await openCmd(a);
+      else await closeCmd(a);
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    } // let central handler + winston deal with it
+  };
+
+
+# File: src/adapters/persistence/memoryPositions.js
+const map = new Map(); // key = productId
+
+module.exports = {
+  upsert: (id, data) => map.set(id, { ...map.get(id), ...data }),
+  get: (id) => map.get(id),
+  del: (id) => map.delete(id),
+  all: () => Array.from(map.values()),
+};
+
+
+# File: src/application/commands/closePosition.js
+module.exports =
+  ({ exchange, store }) =>
+  async (alert) => {
+    const pos = store.get(alert.product);
+    if (!pos) throw new Error("no open pos");
+
+    await exchange.reduceOnly({
+      product_id: pos.product_id,
+      side: pos.side === "buy" ? "sell" : "buy",
+      size: pos.size,
+      client_order_id: alert.client_order_id,
+    });
+
+    store.remove(alert.product);
+  };
+
+
+# File: src/application/commands/openPosition.js
+module.exports =
+  ({ exchange, products, store, risk }) =>
+  async ({ product, side, qty, client_order_id }) => {
+    const prod = products.bySymbol(product);
+    if (!prod) throw new Error(`unknown product ${product}`);
+
+    risk.checkOpen(product, qty, store, prod.mark_price);
+
+    await exchange.marketOrder({
+      product_id: prod.id,
+      side,
+      size: qty,
+      client_order_id,
+    });
+
+    store.upsert(prod.id, { product_id: prod.id, side, size: qty });
+  };
+
+
+# File: src/application/schedulers/riskCron.js
+// src/application/schedulers/riskCron.js
+/* eslint-disable no-await-in-loop */
+const cron = require("node-cron");
+const logger = require("../../config/logger");
+
+/**
+ * Runs every 5 s:
+ *  • pulls the latest mark-price for each *distinct* symbol we hold
+ *  • checks SL / TP stored on the position object
+ *  • calls closeCmd() when either level is crossed
+ */
+module.exports = ({ exchange, store, closeCmd }) => {
+  cron.schedule("*/5 * * * * *", async () => {
+    const positions = store.all();
+    if (positions.length === 0) return;
+
+    // ---- 1. grab one ticker per symbol ---------------------------------
+    const symbols = [...new Set(positions.map((p) => p.symbol))];
+    const priceMap = {};
+
+    for (const sym of symbols) {
+      try {
+        const tkr = await exchange.ticker({ symbol: sym }); // parsed JSON
+        // mark_price for futures / close for spot; pick what exists
+        priceMap[sym] = parseFloat(
+          tkr.mark_price ?? tkr.close ?? tkr.price ?? tkr.p
+        );
+      } catch (err) {
+        logger.warn(`ticker failed for ${sym}: ${err.message}`);
+      }
+    }
+
+    // ---- 2. evaluate each position -------------------------------------
+    for (const pos of positions) {
+      const ltp = priceMap[pos.symbol];
+      if (!ltp) continue; // no price, skip this round
+
+      const isLong = pos.side.toLowerCase() === "buy";
+      const hitSL = isLong ? ltp <= pos.sl : ltp >= pos.sl;
+      const hitTP = isLong ? ltp >= pos.tp : ltp <= pos.tp;
+
+      if (!hitSL && !hitTP) continue;
+
+      try {
+        logger.info(
+          `RiskCron: ${hitSL ? "SL" : "TP"} triggered on ${pos.symbol} @ ${ltp}`
+        );
+
+        await closeCmd({
+          product: pos.symbol,
+          client_order_id: `risk-${Date.now()}`,
+        });
+
+        store.del(pos.product_id);
+      } catch (err) {
+        logger.error(`RiskCron close failed: ${err.message}`);
+      }
+    }
+  });
+};
+
+
+# File: src/config/env.js
+require("dotenv").config(); // load .env at boot
+
+function must(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} not set in .env`);
+  return v;
+}
+
+module.exports = {
+  delta: {
+    key: process.env.DELTA_API_KEY,
+    secret: process.env.DELTA_API_SECRET,
+    restUrl: process.env.DELTA_BASE_URL || 'https://api.india.delta.exchange'
+  }
+};
+
+# File: src/config/logger.js
+const { createLogger, format, transports } = require("winston");
+const safeStringify = require('fast-safe-stringify'); // ✅ new package
+
+module.exports = createLogger({
+  level: process.env.LOG_LEVEL || "info",
+  format: format.combine(
+    format.colorize(),
+    format.timestamp({ format: "YYYY-MM-DD HH:mm:ss.SSS" }),
+    format.printf(({ timestamp, level, message, ...meta }) => {
+      const metaStr = Object.keys(meta).length ? ' ' + safeStringify(meta) : '';
+      return `${timestamp} ${level}: ${message}${metaStr}`;
+    })
+  ),
+  transports: [new transports.Console()],
+});
+
+
+# File: src/domain/services/RiskService.js
+//--------------------------------------------------------------------------
+// A very small rule-engine:
+//
+// • One global “max contracts per product” limit
+// • One global “max portfolio notional” limit
+// • Auto-nuke positions whose UPL < -X%
+//--------------------------------------------------------------------------
+const MAX_SIZE = {
+  // contracts; per symbol
+  BTCUSD: 10,
+  ETHUSD: 50,
+};
+
+const MAX_NOTIONAL = 250_000; // USD
+
+const STOP_OUT_PCT = -0.03; // -3 % unrealised PnL triggers close
+
+class RiskService {
+  /* ------------------------------------------------------------------- */
+  /** Helper you already had – unchanged */
+  static calcTargets(price, side, atr = 0.005) {
+    const sl =
+      side.toLowerCase() === "buy" ? price * (1 - atr) : price * (1 + atr);
+
+    const tp =
+      side.toLowerCase() === "buy"
+        ? price * (1 + 2 * atr)
+        : price * (1 - 2 * atr);
+
+    return { sl, tp };
+  }
+
+  /* ------------------------------------------------------------------- */
+  /**
+   * Checks whether opening <qty> contracts on <symbol> is allowed.
+   * Throws an Error if any rule is broken so the caller can `catch`
+   * and return 4xx/5xx.
+   */
+  static checkOpen(symbol, qty, store, lastPrice) {
+    // 1 ) per-product size limit
+    const current = store.get(symbol)?.size || 0;
+    const limit = MAX_SIZE[symbol] ?? Infinity;
+    if (current + qty > limit) {
+      throw new Error(
+        `risk: size ${current + qty} > limit ${limit} on ${symbol}`
+      );
+    }
+
+    // 2 ) portfolio notional limit
+    const notionalNow = store
+      .all()
+      .reduce((sum, p) => sum + p.size * (p.lastPrice || lastPrice), 0);
+
+    const newNotional = notionalNow + qty * lastPrice;
+    if (newNotional > MAX_NOTIONAL) {
+      throw new Error(`risk: notional ${newNotional} > ${MAX_NOTIONAL} USD`);
+    }
+  }
+
+  /* ------------------------------------------------------------------- */
+  /**
+   * Scans current positions and returns *array* of positions that must
+   * be liquidated immediately (risk-cron will call reduceOnly on them).
+   * Here we use a simple UPL% rule; you can add margin, funding, etc.
+   *
+   * @param   {Array} positions – store.all()
+   * @returns {Array}           – subset to close
+   */
+  static positionsToNuke(positions) {
+    return positions.filter(
+      (p) => (p.uplPct ?? 0) < STOP_OUT_PCT // unrealised PnL worse than -3 %
+    );
+  }
+}
+
+module.exports = RiskService;
+
+
+# File: src/index.js
+const express = require("express");
+const bodyParser = require("body-parser");
+const morgan = require("morgan");
+const expressWinston = require("express-winston");
+const logger = require("./config/logger");
+const env = require("./config/env");
+
+/* domain … ----------------------------------------------------------------- */
+const exchange = require("./adapters/exchange/delta");
+const products = require("./adapters/exchange/products");
+const store = require("./adapters/persistence/memoryPositions");
+const risk = require("./domain/services/RiskService");
+
+const openCmd = require("./application/commands/openPosition")({
+  exchange,
+  products,
+  store,
+  risk,
+});
+const closeCmd = require("./application/commands/closePosition")({
+  exchange,
+  store,
+});
+
+(async () => {
+  /* preload product cache */
+  const list = await products.ready();
+  logger.info(`Loaded ${list.length} products`);
+
+  const deps = { exchange, products, store, risk, openCmd, closeCmd };
+
+  /* ─── HTTP layer ────────────────────────────────────────────────────── */
+  const app = express();
+  app.use(bodyParser.json());
+
+  /* 1️⃣ very slim access log ------------------------------------------- */
+  morgan.token("body", (req) =>
+    req.method === "POST"
+      ? JSON.stringify(req.body).slice(0, 200) // truncate long alerts
+      : ""
+  );
+  app.use(
+    morgan(":method :url :status :response-time ms :body", {
+      immediate: true,
+      stream: { write: (msg) => logger.http(msg.trim()) },
+    })
+  );
+
+  /* 2️⃣ routes ---------------------------------------------------------- */
+  app.use("/webhooks", require("./adapters/http/tradingview")(deps));
+  app.get("/healthz", (_req, res) => res.json({ ok: true }));
+
+  /* 3️⃣ domain → http error mapper ------------------------------------- */
+  app.use((err, _req, res, next) => {
+    /* Swagger errors have err.response; plain throw() have only message */
+    const code = err.response?.body?.error?.code || "internal_error";
+    const ctx = err.response?.body?.error?.context || null;
+    const status = err.response?.statusCode === 400 ? 400 : 500;
+
+    res.status(status).json({ code, msg: err.message, ctx, status });
+    next(Object.assign(new Error(code), { ctx, status })); // → winston
+  });
+
+  app.use((err, _req, _res, _next) => {
+    logger.error(err.message, { status: err.status, ctx: err.ctx });
+  });
+
+  app.listen(env.port, () => logger.info(`API on :${env.port}`));
+})().catch((e) => {
+  logger.error("fatal boot error", e);
+  process.exit(1);
+});
+
+
