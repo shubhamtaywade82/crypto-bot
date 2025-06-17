@@ -1,15 +1,18 @@
 module.exports =
   ({ exchange, store }) =>
-  async (alert) => {
-    const pos = store.get(alert.product);
-    if (!pos) throw new Error("no open pos");
+  async ({ product }) => {
+    const pos = store.all().find((p) => p.symbol === product);
+    if (!pos) throw new Error("no open position");
 
-    await exchange.reduceOnly({
+    const payload = {
       product_id: pos.product_id,
-      side: pos.side === "buy" ? "sell" : "buy",
       size: pos.size,
-      client_order_id: alert.client_order_id,
-    });
+      side: pos.side === "buy" ? "sell" : "buy",
+      order_type: "market",
+      reduce_only: true,
+    };
 
-    store.remove(alert.product);
+    const result = await exchange.placeOrder(payload);
+    store.del(pos.product_id);
+    return result;
   };

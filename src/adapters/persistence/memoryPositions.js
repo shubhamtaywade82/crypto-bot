@@ -1,4 +1,4 @@
-const map = new Map(); // key = productId
+const map = new Map();
 
 module.exports = {
   upsert: (id, data) => map.set(id, { ...map.get(id), ...data }),

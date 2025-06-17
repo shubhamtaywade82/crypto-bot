@@ -1,34 +1,42 @@
-const Ajv = require("ajv"); // npm i ajv
+const Ajv = require("ajv");
 const ajv = new Ajv();
+const idStore = require("../persistence/idempotencyStore");
+const notify = require("../notifications/telegram");
 
 const schema = {
   type: "object",
-  required: ["action", "product", "side", "qty"],
+  required: ["action", "product", "side"],
   properties: {
     action: { enum: ["OPEN", "CLOSE"] },
     product: { type: "string" },
     side: { enum: ["buy", "sell"] },
-    qty: { type: "number", minimum: 1 },
-    client_order_id: { type: "string", nullable: true },
   },
   additionalProperties: false,
 };
+
 const validate = ajv.compile(schema);
 
 module.exports =
   ({ openCmd, closeCmd }) =>
   async (req, res, next) => {
-    if (!validate(req.body))
+    if (!validate(req.body)) {
       return res
         .status(400)
-        .json({ error: "invalid payload", details: validate.errors });
+        .json({ error: "Invalid payload", details: validate.errors });
+    }
 
     try {
-      const a = req.body;
-      if (a.action === "OPEN") await openCmd(a);
-      else await closeCmd(a);
+      const { action, client_order_id } = req.body;
+
+      if (!idStore.register(client_order_id)) {
+        await notify.send(`⚠ Duplicate alert skipped: ${client_order_id}`);
+        return res.json({ duplicate: true });
+      }
+
+      if (action === "OPEN") await openCmd(req.body);
+      if (action === "CLOSE") await closeCmd(req.body);
       res.json({ success: true });
-    } catch (e) {
-      next(e);
-    } // let central handler + winston deal with it
+    } catch (err) {
+      next(err);
+    }
   };

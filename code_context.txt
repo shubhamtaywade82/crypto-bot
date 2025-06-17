@@ -1,65 +1,73 @@
 # File: src/adapters/exchange/delta.js
-// src/adapters/exchange/delta.js
-const market = require('./marketData');
-const trade = require('./trading');
+const market = require("./marketData"); // public
+const trade = require("./trading"); // private
 
 module.exports = {
   ...market,
-  ...trade
+  ...trade,
 };
 
+
 # File: src/adapters/exchange/deltaRest.js
-// src/adapters/exchange/deltaRest.js
-const axios = require('axios');
-const { delta } = require('../../config/env');
-const { generateSignature, serializeQuery } = require('./utils');
+const axios = require("axios");
+const { delta } = require("../../config/env");
+const { generateSignature, serializeQuery } = require("./utils");
 
 const instance = axios.create({
   baseURL: delta.restUrl,
   timeout: 5000,
-  headers: { 'Content-Type': 'application/json' }
+  headers: { "Content-Type": "application/json" },
 });
 
 async function request(method, path, params = {}, body = {}) {
   const timestamp = Date.now().toString();
   const queryStr = serializeQuery(params);
-  const bodyStr = (method === 'GET' || !body) ? '' : JSON.stringify(body);
-  const fullPath = path + (queryStr ? `?${queryStr}` : '');
+  const bodyStr = method === "GET" || !body ? "" : JSON.stringify(body);
+  const fullPath = path + (queryStr ? `?${queryStr}` : "");
 
-  const signature = generateSignature(delta.secret, timestamp, method, path, queryStr, bodyStr);
+  const apiPathForSignature = `/v2${path}`; // <-- 🔥 critical correction 🔥
+
+  const signature = generateSignature(
+    delta.secret,
+    timestamp,
+    method,
+    apiPathForSignature,
+    queryStr,
+    bodyStr
+  );
 
   const headers = {
-    'api-key': delta.key,
-    'timestamp': timestamp,
-    'signature': signature
+    "api-key": delta.key,
+    timestamp: timestamp,
+    signature: signature,
   };
 
-  return instance.request({
-    method,
-    url: fullPath,
-    params,
-    data: body,
-    headers
-  }).then(res => res.data);
+  return instance
+    .request({
+      method,
+      url: fullPath, // <-- always prefix with /v2
+      params,
+      data: body,
+      headers,
+    })
+    .then((res) => res.data);
 }
 
 module.exports = { request };
 
+
 # File: src/adapters/exchange/marketData.js
-const { publicRequest } = require('./publicRest');
+const { publicRequest } = require("./publicRest");
 
 async function listProducts() {
-  return publicRequest('GET', '/v2/products');
+  return publicRequest("GET", "/v2/products");
 }
 
-async function getTicker(symbol) {
-  return publicRequest('GET', `/v2/tickers/${symbol}`);
-}
+module.exports = { listProducts };
 
-module.exports = { listProducts, getTicker };
 
 # File: src/adapters/exchange/products.js
-const { listProducts } = require("./delta"); // helper exists again
+const { listProducts } = require("./marketData");
 let cache = [];
 
 let readyP = refresh();
@@ -67,81 +75,96 @@ let readyP = refresh();
 async function refresh() {
   const body = await listProducts();
   cache = Array.isArray(body.result) ? body.result : body;
-  setTimeout(refresh, 60 * 60 * 1000);
+  setTimeout(refresh, 60 * 60 * 1000); // refresh hourly
   return cache;
 }
 
 module.exports = {
   bySymbol: (s) => cache.find((p) => p.symbol === s),
-  getBySymbol: (s) => cache.find((p) => p.symbol === s), // ← alias for legacy code
   ready: () => readyP,
 };
 
 
 # File: src/adapters/exchange/publicRest.js
-const axios = require('axios');
-const { delta } = require('../../config/env');
+const axios = require("axios");
+const { delta } = require("../../config/env");
 
 const instance = axios.create({
   baseURL: delta.restUrl,
   timeout: 5000,
-  headers: { 'Content-Type': 'application/json' }
+  headers: { "Content-Type": "application/json" },
 });
 
 async function publicRequest(method, path, params = {}) {
-  return instance.request({
-    method,
-    url: path,
-    params
-  }).then(res => res.data);
+  return instance
+    .request({ method, url: path, params })
+    .then((res) => res.data);
 }
 
 module.exports = { publicRequest };
 
+
+# File: src/adapters/exchange/symbolMap.js
+// Adapts TradingView symbols to India DeltaExchange symbols
+const SYMBOL_MAP = {
+  'BTCUSD.P': 'BTCUSD',
+  'BTCUSDT.P': 'BTCUSDT',
+  'ETHUSD.P': 'ETHUSD',
+  // add more mappings here
+};
+
+function normalizeSymbol(symbol) {
+  return SYMBOL_MAP[symbol] || symbol;
+}
+
+module.exports = { normalizeSymbol };
+
+
 # File: src/adapters/exchange/trading.js
 // src/adapters/exchange/trading.js
-const { request } = require('./deltaRest');
+const { request } = require("./deltaRest");
 
 async function placeOrder(order) {
-  return request('POST', '/orders', {}, order);
+  return request("POST", "/v2/orders", {}, order);
 }
 
 async function cancelOrder(order_id) {
-  return request('DELETE', `/orders/${order_id}`);
+  return request("DELETE", `/v2/orders/${order_id}`);
 }
 
 async function changeLeverage(payload) {
-  return request('POST', '/positions/change_leverage', {}, payload);
+  return request("POST", "/v2/positions/change_leverage", {}, payload);
 }
 
 async function getBalances() {
-  return request('GET', '/wallet/balances');
+  return request("GET", "/v2/wallet/balances");
 }
 
 module.exports = { placeOrder, cancelOrder, changeLeverage, getBalances };
 
+
 # File: src/adapters/exchange/utils.js
-// src/adapters/exchange/utils.js
-const crypto = require('crypto');
+const crypto = require("crypto");
 
 function generateSignature(secret, timestamp, method, path, query, body) {
   const payload = `${timestamp}${method}${path}${query}${body}`;
-  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  return crypto.createHmac("sha256", secret).update(payload).digest("hex");
 }
 
 function serializeQuery(params = {}) {
   const keys = Object.keys(params).sort();
-  return keys.map(k => `${k}=${encodeURIComponent(params[k])}`).join('&');
+  return keys.map((k) => `${k}=${encodeURIComponent(params[k])}`).join("&");
 }
 
 module.exports = { generateSignature, serializeQuery };
+
 
 # File: src/adapters/http/health.js
 module.exports = (feed) => (_, res) => res.json({ wsUp: feed.isConnected() });
 
 
 # File: src/adapters/http/tradingview.js
-const Ajv = require("ajv"); // npm i ajv
+const Ajv = require("ajv");
 const ajv = new Ajv();
 
 const schema = {
@@ -151,35 +174,36 @@ const schema = {
     action: { enum: ["OPEN", "CLOSE"] },
     product: { type: "string" },
     side: { enum: ["buy", "sell"] },
-    qty: { type: "number", minimum: 1 },
-    client_order_id: { type: "string", nullable: true },
+    qty: { type: "number" },
+    client_order_id: { type: "string" }, // ✅ added this line
   },
   additionalProperties: false,
 };
+
 const validate = ajv.compile(schema);
 
 module.exports =
   ({ openCmd, closeCmd }) =>
   async (req, res, next) => {
-    if (!validate(req.body))
+    if (!validate(req.body)) {
       return res
         .status(400)
-        .json({ error: "invalid payload", details: validate.errors });
+        .json({ error: "Invalid payload", details: validate.errors });
+    }
 
     try {
-      const a = req.body;
-      if (a.action === "OPEN") await openCmd(a);
-      else await closeCmd(a);
+      const { action, ...data } = req.body;
+      if (action === "OPEN") await openCmd(data);
+      if (action === "CLOSE") await closeCmd(data);
       res.json({ success: true });
-    } catch (e) {
-      next(e);
-    } // let central handler + winston deal with it
+    } catch (err) {
+      next(err);
+    }
   };
 
 
 # File: src/adapters/persistence/memoryPositions.js
-const map = new Map(); // key = productId
-
+const map = new Map();
 module.exports = {
   upsert: (id, data) => map.set(id, { ...map.get(id), ...data }),
   get: (id) => map.get(id),
@@ -191,38 +215,52 @@ module.exports = {
 # File: src/application/commands/closePosition.js
 module.exports =
   ({ exchange, store }) =>
-  async (alert) => {
-    const pos = store.get(alert.product);
-    if (!pos) throw new Error("no open pos");
+  async ({ product }) => {
+    const pos = store.all().find((p) => p.symbol === product);
+    if (!pos) throw new Error("no open position");
 
-    await exchange.reduceOnly({
+    await exchange.placeOrder({
       product_id: pos.product_id,
-      side: pos.side === "buy" ? "sell" : "buy",
       size: pos.size,
-      client_order_id: alert.client_order_id,
+      side: pos.side === "buy" ? "sell" : "buy",
+      order_type: "market",
+      reduce_only: true,
     });
 
-    store.remove(alert.product);
+    store.del(pos.product_id);
   };
 
 
 # File: src/application/commands/openPosition.js
+const { normalizeSymbol } = require("../../adapters/exchange/symbolMap");
+
 module.exports =
   ({ exchange, products, store, risk }) =>
-  async ({ product, side, qty, client_order_id }) => {
-    const prod = products.bySymbol(product);
-    if (!prod) throw new Error(`unknown product ${product}`);
+  async ({ product, side, qty }) => {
+    const symbol = normalizeSymbol(product);
+    const prod = products.bySymbol(symbol);
+    if (!prod) throw new Error(`unknown product ${symbol}`);
 
-    risk.checkOpen(product, qty, store, prod.mark_price);
+    const price = parseFloat(prod.mark_price || prod.close_price);
+    const targets = risk.calcTargets(price, side);
 
-    await exchange.marketOrder({
+    await exchange.placeOrder({
       product_id: prod.id,
-      side,
       size: qty,
-      client_order_id,
+      side,
+      order_type: "market",
+      reduce_only: false,
+      post_only: false,
     });
 
-    store.upsert(prod.id, { product_id: prod.id, side, size: qty });
+    store.upsert(prod.id, {
+      product_id: prod.id,
+      symbol: prod.symbol,
+      side,
+      size: qty,
+      sl: targets.sl,
+      tp: targets.tp,
+    });
   };
 
 
@@ -290,7 +328,7 @@ module.exports = ({ exchange, store, closeCmd }) => {
 
 
 # File: src/config/env.js
-require("dotenv").config(); // load .env at boot
+require("dotenv").config();
 
 function must(name) {
   const v = process.env[name];
@@ -299,12 +337,14 @@ function must(name) {
 }
 
 module.exports = {
+  port: process.env.PORT || 3000,
   delta: {
-    key: process.env.DELTA_API_KEY,
-    secret: process.env.DELTA_API_SECRET,
-    restUrl: process.env.DELTA_BASE_URL || 'https://api.india.delta.exchange'
-  }
+    key: must('DELTA_API_KEY'),
+    secret: must('DELTA_API_SECRET'),
+    restUrl: process.env.DELTA_BASE_URL || "https://api.india.delta.exchange",
+  },
 };
+
 
 # File: src/config/logger.js
 const { createLogger, format, transports } = require("winston");
@@ -325,81 +365,17 @@ module.exports = createLogger({
 
 
 # File: src/domain/services/RiskService.js
-//--------------------------------------------------------------------------
-// A very small rule-engine:
-//
-// • One global “max contracts per product” limit
-// • One global “max portfolio notional” limit
-// • Auto-nuke positions whose UPL < -X%
-//--------------------------------------------------------------------------
-const MAX_SIZE = {
-  // contracts; per symbol
-  BTCUSD: 10,
-  ETHUSD: 50,
-};
-
-const MAX_NOTIONAL = 250_000; // USD
-
-const STOP_OUT_PCT = -0.03; // -3 % unrealised PnL triggers close
-
 class RiskService {
-  /* ------------------------------------------------------------------- */
-  /** Helper you already had – unchanged */
   static calcTargets(price, side, atr = 0.005) {
     const sl =
       side.toLowerCase() === "buy" ? price * (1 - atr) : price * (1 + atr);
-
     const tp =
       side.toLowerCase() === "buy"
         ? price * (1 + 2 * atr)
         : price * (1 - 2 * atr);
-
     return { sl, tp };
   }
-
-  /* ------------------------------------------------------------------- */
-  /**
-   * Checks whether opening <qty> contracts on <symbol> is allowed.
-   * Throws an Error if any rule is broken so the caller can `catch`
-   * and return 4xx/5xx.
-   */
-  static checkOpen(symbol, qty, store, lastPrice) {
-    // 1 ) per-product size limit
-    const current = store.get(symbol)?.size || 0;
-    const limit = MAX_SIZE[symbol] ?? Infinity;
-    if (current + qty > limit) {
-      throw new Error(
-        `risk: size ${current + qty} > limit ${limit} on ${symbol}`
-      );
-    }
-
-    // 2 ) portfolio notional limit
-    const notionalNow = store
-      .all()
-      .reduce((sum, p) => sum + p.size * (p.lastPrice || lastPrice), 0);
-
-    const newNotional = notionalNow + qty * lastPrice;
-    if (newNotional > MAX_NOTIONAL) {
-      throw new Error(`risk: notional ${newNotional} > ${MAX_NOTIONAL} USD`);
-    }
-  }
-
-  /* ------------------------------------------------------------------- */
-  /**
-   * Scans current positions and returns *array* of positions that must
-   * be liquidated immediately (risk-cron will call reduceOnly on them).
-   * Here we use a simple UPL% rule; you can add margin, funding, etc.
-   *
-   * @param   {Array} positions – store.all()
-   * @returns {Array}           – subset to close
-   */
-  static positionsToNuke(positions) {
-    return positions.filter(
-      (p) => (p.uplPct ?? 0) < STOP_OUT_PCT // unrealised PnL worse than -3 %
-    );
-  }
 }
-
 module.exports = RiskService;
 
 
@@ -407,11 +383,9 @@ module.exports = RiskService;
 const express = require("express");
 const bodyParser = require("body-parser");
 const morgan = require("morgan");
-const expressWinston = require("express-winston");
 const logger = require("./config/logger");
 const env = require("./config/env");
 
-/* domain … ----------------------------------------------------------------- */
 const exchange = require("./adapters/exchange/delta");
 const products = require("./adapters/exchange/products");
 const store = require("./adapters/persistence/memoryPositions");
@@ -429,21 +403,16 @@ const closeCmd = require("./application/commands/closePosition")({
 });
 
 (async () => {
-  /* preload product cache */
   const list = await products.ready();
   logger.info(`Loaded ${list.length} products`);
 
-  const deps = { exchange, products, store, risk, openCmd, closeCmd };
+  const deps = { openCmd, closeCmd };
 
-  /* ─── HTTP layer ────────────────────────────────────────────────────── */
   const app = express();
   app.use(bodyParser.json());
 
-  /* 1️⃣ very slim access log ------------------------------------------- */
   morgan.token("body", (req) =>
-    req.method === "POST"
-      ? JSON.stringify(req.body).slice(0, 200) // truncate long alerts
-      : ""
+    req.method === "POST" ? JSON.stringify(req.body).slice(0, 200) : ""
   );
   app.use(
     morgan(":method :url :status :response-time ms :body", {
@@ -452,29 +421,10 @@ const closeCmd = require("./application/commands/closePosition")({
     })
   );
 
-  /* 2️⃣ routes ---------------------------------------------------------- */
   app.use("/webhooks", require("./adapters/http/tradingview")(deps));
-  app.get("/healthz", (_req, res) => res.json({ ok: true }));
+  app.get("/healthz", (_, res) => res.json({ ok: true }));
 
-  /* 3️⃣ domain → http error mapper ------------------------------------- */
-  app.use((err, _req, res, next) => {
-    /* Swagger errors have err.response; plain throw() have only message */
-    const code = err.response?.body?.error?.code || "internal_error";
-    const ctx = err.response?.body?.error?.context || null;
-    const status = err.response?.statusCode === 400 ? 400 : 500;
-
-    res.status(status).json({ code, msg: err.message, ctx, status });
-    next(Object.assign(new Error(code), { ctx, status })); // → winston
-  });
-
-  app.use((err, _req, _res, _next) => {
-    logger.error(err.message, { status: err.status, ctx: err.ctx });
-  });
-
-  app.listen(env.port, () => logger.info(`API on :${env.port}`));
-})().catch((e) => {
-  logger.error("fatal boot error", e);
-  process.exit(1);
-});
+  app.listen(env.port, () => logger.info(`API running on port ${env.port}`));
+})();
 
 

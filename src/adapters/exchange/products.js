@@ -1,4 +1,5 @@
-const { listProducts } = require("./delta"); // helper exists again
+const { listProducts } = require("./marketData");
+
 let cache = [];
 
 let readyP = refresh();
@@ -6,12 +7,12 @@ let readyP = refresh();
 async function refresh() {
   const body = await listProducts();
   cache = Array.isArray(body.result) ? body.result : body;
-  setTimeout(refresh, 60 * 60 * 1000);
+  setTimeout(refresh, 60 * 60 * 1000); // refresh hourly
   return cache;
 }
 
 module.exports = {
   bySymbol: (s) => cache.find((p) => p.symbol === s),
-  getBySymbol: (s) => cache.find((p) => p.symbol === s), // ← alias for legacy code
   ready: () => readyP,
+  all: () => cache,
 };

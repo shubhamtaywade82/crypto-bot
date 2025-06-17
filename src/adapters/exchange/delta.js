@@ -1,5 +1,5 @@
-const market = require("./marketData"); // public
-const trade = require("./trading"); // private
+const market = require("./marketData");
+const trade = require("./trading");
 
 module.exports = {
   ...market,
